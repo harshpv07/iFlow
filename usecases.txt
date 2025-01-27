@@ -1,0 +1,2 @@
+- Open spotify and play a song 
+- Simple web searches

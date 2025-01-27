@@ -6,6 +6,25 @@ from typing import Annotated, Sequence, TypedDict
 from langgraph.graph import Graph, StateGraph , START, END
 from langgraph.prebuilt import ToolInvocation
 from langgraph.checkpoint.memory import MemorySaver
+# Load environment variables from .env
+from dotenv import load_dotenv
+from flask import Flask, request
+
+app = Flask(__name__)
+
+@app.route('/process', methods=['POST'])
+def process():
+    data = request.json  # Get the JSON payload
+    print(data)
+    workflow = create_workflow()
+    #result = workflow.invoke({"query": data["text"], "messages": [], "script": None, "execution_result": None})
+    #return jsonify(result)
+    return {"message": f"Received data: {data}"}
+
+
+# Load environment variables
+load_dotenv()
+
 # Define state schema
 class AgentState(TypedDict):
     messages: Annotated[Sequence[ToolInvocation], "messages"]
@@ -16,27 +35,54 @@ class AgentState(TypedDict):
 def main():
     st.title("Task Automation Assistant")
     
-    # Create text input
-    user_input = st.text_input("Enter your task:", "")
+    # Initialize chat history in session state if it doesn't exist
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
     
-    # Create button
-    if st.button("Execute Task"):
-        if user_input:
-            workflow = create_workflow()
-            result = workflow.invoke({"query": user_input, "messages": [], "script": None, "execution_result": None})
-            
+    # Display chat history
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+            if "output" in message:
+                st.code(message["output"])
+    
+    # Chat input
+    user_input = st.chat_input("Enter your task:")
+    
+    if user_input:
+        # Display user message
+        with st.chat_message("user"):
+            st.write(user_input)
+        
+        # Add user message to chat history
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        
+        # Process the task
+        workflow = create_workflow()
+        result = workflow.invoke({"query": user_input, "messages": [], "script": None, "execution_result": None})
+        
+        # Display assistant response
+        with st.chat_message("assistant"):
             if result["execution_result"]:
-                st.success("Task executed successfully!")
+                st.write("Task executed successfully!")
+                if result["script"]:
+                    st.code(result["script"], language="batch")
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": "Task executed successfully!",
+                    "output": result["script"]
+                })
             else:
-                st.warning("Try another query")
-        else:
-            st.warning("Please enter a task description!")
-
+                st.write("Executed Task")
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": "Executed Task"
+                })
 
 def script_validator_agent(state: AgentState) -> AgentState:
     client = OpenAI(
         base_url="https://integrate.api.nvidia.com/v1",
-        api_key="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"
+        api_key = "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"
     )
 
     messages = [
@@ -61,12 +107,10 @@ def script_validator_agent(state: AgentState) -> AgentState:
     else:
         return {"messages": state["messages"], "query": state["query"], "script": None, "execution_result": False}
 
-
-
 def script_generator_agent(state: AgentState) -> AgentState:
     client = OpenAI(
         base_url="https://integrate.api.nvidia.com/v1",
-        api_key="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"
+        api_key="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"
     )
 
     messages = [
@@ -90,6 +134,51 @@ def script_generator_agent(state: AgentState) -> AgentState:
     print(script_content)
     return {"messages": state["messages"], "query": state["query"], "script": script_content, "execution_result": None}
 
+
+def input_collector_agent(state: AgentState) -> AgentState:
+    client = OpenAI(
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key= "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"
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": f"""For the following task, determine if any additional user inputs are needed.
+            If inputs are needed, list them one per line starting with '?'. If no inputs needed, respond with 'None'.
+            Task: {state['query']}"""
+        }
+    ]
+
+    completion = client.chat.completions.create(
+        model="meta/llama-3.3-70b-instruct",
+        messages=messages,
+        temperature=0.2,
+        top_p=0.7,
+        max_tokens=1024
+    )
+
+    required_inputs = completion.choices[0].message.content.strip()
+    
+    if required_inputs.lower() == 'none':
+        return {"messages": state["messages"], "query": state["query"], "script": None, "execution_result": None}
+    
+    # Collect additional inputs from user
+    collected_inputs = {}
+    for input_line in required_inputs.split('\n'):
+        if input_line.startswith('?'):
+            input_prompt = input_line[1:].strip()
+            user_response = st.text_input(input_prompt)
+            if user_response:
+                collected_inputs[input_prompt] = user_response
+    
+    # Append collected inputs to original query
+    enhanced_query = state["query"] + "\nAdditional inputs:\n"
+    for prompt, value in collected_inputs.items():
+        enhanced_query += f"{prompt}: {value}\n"
+    
+    return {"messages": state["messages"], "query": enhanced_query, "script": None, "execution_result": None}
+
 def execution_agent(state: AgentState) -> AgentState:
     script_content = state["script"]
     try:
@@ -110,8 +199,6 @@ def execution_agent(state: AgentState) -> AgentState:
         os.remove(temp_script_path)
 
         if result.returncode == 0:
-            st.write("Command Output:")
-            st.code(result.stdout)
             return {"messages": state["messages"], "query": state["query"], "script": script_content, "execution_result": True}
         else:
             return {"messages": state["messages"], "query": state["query"], "script": script_content, "execution_result": False}
@@ -140,5 +227,7 @@ def create_workflow() -> Graph:
     
     return workflow.compile()
 
+from flask import jsonify
+
 if __name__ == "__main__":
-    main()
+    app.run(port=8501 , debug=True)
