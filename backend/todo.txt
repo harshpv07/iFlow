@@ -1,0 +1,15 @@
+#Separte embedding space for the emails and notes 
+#Ingestion pipeline
+#handle image in both the places. 
+
+
+
+#If time permits, workfow for videos and images from your gallery. 
+
+
+#If time permits, workfow for videos and images from your gallery. 
+
+
+Multi agentic workflow for the email and notes. 
+
+

@@ -96,9 +96,97 @@ def fetch_onenote_contents():
     return all_pages
 
 
+def process_pdfs_with_clip(path : str , collection_type : str):
+    """Process PDFs from email_examples folder using CLIP embeddings and store in Milvus"""
+    import torch
+    from transformers import CLIPProcessor, CLIPModel
+    import fitz  # PyMuPDF
+    import os
+    
+    # Initialize CLIP model and processor
+    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    
+    pdf_dir = path
+    if not os.path.isdir(pdf_dir):
+        raise ValueError(f"'{pdf_dir}' is not a valid directory")
+    
+    pdf_files = [f for f in os.listdir(pdf_dir) if f.lower().endswith('.pdf')]
+    if not pdf_files:
+        raise ValueError(f"No PDF files found in directory '{pdf_dir}'")
+    
+    embeddings_data = []
+    
+    for filename in pdf_files:
+        pdf_path = os.path.join(pdf_dir, filename)
+        doc = fitz.open(pdf_path)
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            
+            # Extract text
+            text = page.get_text()
+            
+            # Get CLIP embedding for text
+            inputs = processor(text=text, return_tensors="pt", padding=True, truncation=True)
+            text_features = model.get_text_features(**inputs)
+            text_embedding = text_features.detach().numpy()[0]
+            
+            embeddings_data.append({
+                'embedding': text_embedding.tolist(),
+                'text': text,
+                'metadata': {
+                    'source': filename,
+                    'chunk_index': f"page_{page_num}",
+                    'has_images': False
+                }
+            })
+        
+        doc.close()
+    
+    # Store embeddings in Milvus
+    store_in_milvus(embeddings_data, collection_type=collection_type)
+    
+    return len(embeddings_data)
+
+
+def store_in_milvus(embeddings_data, collection_type):
+    """Store embeddings in Milvus collection"""
+    from pymilvus import connections, Collection, CollectionSchema, FieldSchema, DataType, utility
+
+    # Connect to Milvus
+    connections.connect("default", host="localhost", port="19530")
+    
+    dim = len(embeddings_data[0]['embedding'])
+    collection_name = f"clip_{collection_type}"
+
+    # Define collection schema
+    fields = [
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dim),
+        FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
+        FieldSchema(name="metadata", dtype=DataType.JSON)
+    ]
+    schema = CollectionSchema(fields=fields, description=f"CLIP embeddings for {collection_type}")
+
+    # Create or get collection
+    if collection_name not in utility.list_collections():
+        collection = Collection(name=collection_name, schema=schema)
+        collection.create_index(field_name="embedding", index_params={"metric_type": "L2"})
+    else:
+        collection = Collection(collection_name)
+        collection.load()
+
+    # Insert data
+    data = [
+        [e['embedding'] for e in embeddings_data],
+        [e['text'] for e in embeddings_data],
+        [e['metadata'] for e in embeddings_data]
+    ]
+    collection.insert(data)
+    collection.flush()
+
+
 if __name__ == "__main__":
-    try:
-        pages = fetch_onenote_contents()
-        print(pages)
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    process_pdfs_with_clip("../email_examples", "emails")
+    process_pdfs_with_clip("../notes_examples", "notes")

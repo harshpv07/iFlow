@@ -1,2 +1,4 @@
 - Open spotify and play a song 
 - Simple web searches
+# Gallary
+# Photo check
